@@ -1,0 +1,234 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+from fuzzywuzzy import fuzz
+from fuzzywuzzy import process
+
+# --- Data Generation and Normalization Functions ---
+
+def get_legacy_data():
+    """Simulates the old, messy Access database."""
+    data = {
+        'DonorName': [
+            'Michael Smith', 'Mike Smith', 'Jane Doe', 'Michael J. Smith', 'Jane Doe',
+            'Talisman Energy Inc.', 'Talisman Energy, Inc.', 'Talizman Energy Inc.', 'Jane Doe', 'John Smith', 'John', 'Jonathan Smith'
+        ],
+        'DonationAmount': [100, 50, 200, 75, 150, 1000, 1500, 500, 250, 50, 10, 30],
+        'DonationDate': [
+            '2015-01-15', '2015-02-20', '2015-03-01', '2015-04-10', '2015-05-15',
+            '2015-06-20', '2015-07-25', '2015-08-30', '2015-09-10', '2015-09-20', '2015-09-25', '2015-10-01'
+        ]
+    }
+    return pd.DataFrame(data)
+
+def get_volunteer_data():
+    """Simulates a separate database for volunteer hours."""
+    data = {
+        'VolunteerID': [1, 2, 3],
+        'Name': ['Michael J. Smith', 'Jane Doe', 'John'], # Notice the inconsistent names
+        'Hours': [20, 15, 5],
+        'Date': pd.to_datetime(['2015-03-01', '2015-04-05', '2015-09-25'])
+    }
+    return pd.DataFrame(data)
+
+def normalize_data(legacy_df):
+    """
+    Cleans and normalized the legacy data into separate tables using fuzzy matching.
+    """
+    donors_df_list = []
+    donations_df_list = []
+    
+    # Pre-process names and find unique donor names using fuzzy matching
+    # This is a simplified version for demonstration
+    unique_donors = []
+    donor_map = {}
+    
+    for name in legacy_df['DonorName'].unique():
+        found = False
+        # Normalize the name for comparison
+        clean_name = name.lower().replace('.', '').replace(',', '').replace('inc.', 'inc').strip()
+        
+        # Check against existing unique donors
+        if not unique_donors:
+            unique_donors.append(name)
+            donor_map[name] = name
+        else:
+            best_match, score = process.extractOne(clean_name, [n.lower() for n in unique_donors])
+            
+            # If a match is found with a high enough score, map the new name to the existing unique donor
+            if score > 80:
+                original_best_match = [n for n in unique_donors if n.lower() == best_match][0]
+                donor_map[name] = original_best_match
+                found = True
+            
+            # If no good match is found, add it as a new unique donor
+            if not found:
+                unique_donors.append(name)
+                donor_map[name] = name
+
+    # Create the Donors table
+    donors_df = pd.DataFrame({
+        'DonorName': unique_donors
+    })
+    donors_df['DonorID'] = np.arange(1, len(donors_df) + 1)
+    
+    # Split names into first and last
+    donors_df['FirstName'] = donors_df['DonorName'].apply(lambda x: x.split()[0] if len(x.split()) > 0 else '')
+    donors_df['LastName'] = donors_df['DonorName'].apply(lambda x: ' '.join(x.split()[1:]) if len(x.split()) > 1 else '')
+    
+    # Create the Donations table
+    legacy_df['NormalizedDonorName'] = legacy_df['DonorName'].map(donor_map)
+    donations_df = pd.merge(legacy_df, donors_df, left_on='NormalizedDonorName', right_on='DonorName', how='left')
+    donations_df = donations_df[['DonorID', 'DonationAmount', 'DonationDate']]
+    donations_df = donations_df.rename(columns={'DonationAmount': 'Amount'})
+
+    donors_df = donors_df[['DonorID', 'FirstName', 'LastName', 'DonorName']]
+    
+    return donors_df, donations_df
+
+# --- Streamlit App Layout and Logic ---
+
+st.set_page_config(
+    page_title="DBMS Business Case",
+    layout="wide"
+)
+
+# Use session state to persist the legacy dataframe
+if 'legacy_df' not in st.session_state:
+    st.session_state.legacy_df = get_legacy_data()
+if 'normalized' not in st.session_state:
+    st.session_state.normalized = False
+
+st.title("Business Case for a New Database System")
+st.markdown("This app demonstrates why a simple database upgrade can solve major business problems.")
+
+# --- THE PROBLEM ---
+st.header("1. The Problem: Messy, Inconsistent Data")
+st.markdown("The old system had unstructured fields, leading to errors and duplication.")
+
+col1, col2 = st.columns([1, 2])
+with col1:
+    with st.form("add_data_form"):
+        st.subheader("Add your own data")
+        st.markdown("Try adding a duplicate name or a different spelling to see the problem.")
+        donor_name = st.text_input("Donor Name", help="e.g., Jane Doe, Johnny, or J. Doe")
+        donation_amount = st.number_input("Donation Amount", min_value=1, step=1)
+        donation_date = st.date_input("Donation Date")
+        
+        submitted = st.form_submit_button("Add Record to Old System")
+        if submitted:
+            new_row = pd.DataFrame([{
+                'DonorName': donor_name,
+                'DonationAmount': donation_amount,
+                'DonationDate': donation_date.strftime('%Y-%m-%d')
+            }])
+            st.session_state.legacy_df = pd.concat([st.session_state.legacy_df, new_row], ignore_index=True)
+            st.success("Record added!")
+
+with col2:
+    st.subheader("Example of old data")
+    st.dataframe(st.session_state.legacy_df)
+    st.warning("⚠️ Notice how the same person appears multiple times with different spellings.")
+    
+# --- THE SOLUTION ---
+st.header("2. The Solution: A Clean, New Database")
+st.markdown("A new, relational database cleans this data using a unique ID for each person, so all their records are correctly linked.")
+if st.button("Click here to normalize the data"):
+    st.session_state.normalized = True
+
+if st.session_state.normalized:
+    st.success("✅ Data is now clean and organized.")
+    donors_df, donations_df = normalize_data(st.session_state.legacy_df)
+    
+    st.subheader("The two new tables")
+    col3, col4 = st.columns(2)
+    with col3:
+        st.info("Donors Table (unique people)")
+        st.dataframe(donors_df)
+    with col4:
+        st.info("Donations Table (linked to a unique DonorID)")
+        st.dataframe(donations_df)
+
+    # --- THE PAYOFF ---
+    st.header("3. The Payoff: Valuable Business Insights")
+    st.markdown("With clean data, we can finally answer critical business questions.")
+
+    st.subheader("Total Donations Per Donor")
+    st.info("Question: Who are our top donors?")
+    total_donations_per_donor = donations_df.groupby('DonorID')['Amount'].sum().reset_index()
+    donor_names = donors_df.set_index('DonorID')['DonorName']
+    total_donations_per_donor['DonorName'] = total_donations_per_donor['DonorID'].map(donor_names)
+    st.bar_chart(total_donations_per_donor.set_index('DonorName'))
+
+    # --- Display Total Donation for a Selected Donor ---
+    st.subheader("Total Money Donated by a Specific Donor")
+    st.info("Question: How much has a single donor given in total?")
+
+    # Create a dropdown to select a donor from the normalized donors list
+    selected_donor_name = st.selectbox(
+        "Select a Donor",
+        options=donors_df['DonorName'].unique(),
+        index=0
+    )
+
+    # Find the DonorID for the selected donor
+    selected_donor_id = donors_df[donors_df['DonorName'] == selected_donor_name]['DonorID'].iloc[0]
+
+    # Filter the donations dataframe for the selected DonorID and calculate the sum
+    total_donated_amount = donations_df[donations_df['DonorID'] == selected_donor_id]['Amount'].sum()
+
+    # Display the result
+    st.metric(
+        label=f"Total Donation for {selected_donor_name}",
+        value=f"${total_donated_amount:,.2f}"
+    )
+
+    st.subheader("Donation Trends Over Time")
+    st.info("Question: Are our donations increasing or decreasing?")
+    donations_df['DonationDate'] = pd.to_datetime(donations_df['DonationDate'])
+    donations_over_time = donations_df.set_index('DonationDate').resample('M')['Amount'].sum().reset_index()
+    st.line_chart(donations_over_time.set_index('DonationDate'))
+    
+    # New section for volunteers
+    st.subheader("Donor Engagement: Connecting Donations & Volunteer Hours")
+    st.markdown("A key benefit of a normalized system is the ability to link data from different sources.")
+    st.info("Question: Which donors also volunteer their time?")
+    
+    # Normalize and link volunteer data to the new Donors table
+    volunteers_df = get_volunteer_data()
+    # Use fuzzy matching to link volunteers to donors
+    volunteer_donor_map = {}
+    for volunteer_name in volunteers_df['Name'].unique():
+        clean_name = volunteer_name.lower().replace('.', '').strip()
+        best_match, score = process.extractOne(clean_name, [n.lower() for n in donors_df['DonorName']])
+        if score > 80:
+            original_best_match = donors_df[donors_df['DonorName'].str.lower() == best_match]['DonorName'].iloc[0]
+            volunteer_donor_map[volunteer_name] = original_best_match
+
+    volunteers_df['NormalizedName'] = volunteers_df['Name'].map(volunteer_donor_map)
+    
+    # Merge the volunteer data with the donors table
+    combined_donors = pd.merge(donors_df, volunteers_df, left_on='DonorName', right_on='NormalizedName', how='left')
+    combined_donors = combined_donors.rename(columns={'Hours': 'VolunteerHours'})
+    combined_donors = combined_donors[['FirstName', 'LastName', 'VolunteerHours']].fillna(0)
+
+    st.dataframe(combined_donors)
+    st.markdown("This table shows that we can now identify donors who also volunteer. This insight is crucial for building a strong relationship with supporters.")
+
+    # Final Summary Table
+    st.subheader("Summary: Old vs. New System")
+    comparison_data = {
+        "Feature": ["Data Integrity", "Query Performance", "Reporting"],
+        "Old System (Messy)": [
+            "Prone to errors.",
+            "Slow and inaccurate.",
+            "Impossible to get real-time insights."
+        ],
+        "New System (Clean)": [
+            "High; uses unique IDs.",
+            "Fast and reliable.",
+            "Automated, real-time insights with charts."
+        ]
+    }
+    comparison_df = pd.DataFrame(comparison_data)
+    st.table(comparison_df.set_index('Feature'))
